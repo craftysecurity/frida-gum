@@ -328,6 +328,25 @@ struct _GumTcbHead
 #endif
 };
 
+// static memmem implementation
+static void *static_memmem(const void *haystack, size_t haystacklen,
+                           const void *needle, size_t needlelen) {
+    const char *h = haystack;
+    const char *n = needle;
+    size_t i;
+
+    if (needlelen > haystacklen) return NULL;
+    if (needlelen == 0) return (void *)haystack;
+
+    for (i = 0; i <= haystacklen - needlelen; i++) {
+        if (memcmp(h + i, n, needlelen) == 0) {
+            return (void *)(h + i);
+        }
+    }
+    return NULL;
+}
+
+
 static void gum_deinit_program_modules (void);
 static gboolean gum_query_program_ranges (GumReadAuxvFunc read_auxv,
     GumProgramRanges * ranges);
@@ -606,24 +625,40 @@ gum_read_auxv_from_stack (void)
   needle.a_type = AT_PHENT;
   needle.a_un.a_val = sizeof (ElfW(Phdr));
 
+  printf("Stack base address: %p\n", (void*)stack.base_address);
+  printf("Stack size: %zu\n", stack.size);
+  printf("Needle size: %zu\n", sizeof(needle));
+
   match = NULL;
   last_match = NULL;
   offset = 0;
   while (offset != stack.size)
   {
-    match = memmem (GSIZE_TO_POINTER (stack.base_address) + offset,
-        stack.size - offset, &needle, sizeof (needle));
+    printf("Searching at offset: %zu\n", offset);
+    match = static_memmem(GSIZE_TO_POINTER(stack.base_address) + offset,
+        stack.size - offset, &needle, sizeof(needle));
     if (match == NULL)
+    {
+      printf("No more matches found\n");
       break;
-
+    }
+    printf("Match found at address: %p\n", match);
     last_match = match;
-    offset = (GUM_ADDRESS (match) - stack.base_address) + 1;
+    offset = (GUM_ADDRESS(match) - stack.base_address) + 1;
   }
+
   if (last_match == NULL)
+  {
+    printf("No matches found in entire stack\n");
     return NULL;
+  }
+
+  printf("Last match found at address: %p\n", last_match);
 
   auxv_start = NULL;
-  page_size = gum_query_page_size ();
+  page_size = gum_query_page_size();
+  printf("Page size: %zu\n", page_size);
+
   for (cursor = last_match - 1;
       (gpointer) cursor >= stack_start;
       cursor--)
@@ -632,25 +667,25 @@ gum_read_auxv_from_stack (void)
     if (probably_an_invalid_type)
     {
       auxv_start = cursor + 1;
+      printf("AUXV start found at: %p\n", auxv_start);
       break;
     }
   }
 
-  auxv_end = NULL;
-  for (cursor = last_match + 1;
-      (gpointer) cursor <= stack_end - sizeof (ElfW(auxv_t));
-      cursor++)
+  if (auxv_start == NULL)
   {
-    if (cursor->a_type == AT_NULL)
-    {
-      auxv_end = cursor + 1;
-      break;
-    }
-  }
-  if (auxv_end == NULL)
+    printf("AUXV start not found\n");
     return NULL;
+  }
 
-  return g_memdup (auxv_start, (guint8 *) auxv_end - (guint8 *) auxv_start);
+  for (cursor = auxv_start; cursor->a_type != AT_NULL; cursor++)
+  {
+    if ((gpointer) cursor >= stack_end - 1)
+      return NULL;
+  }
+  auxv_end = cursor;
+
+  return g_memdup (auxv_start, (auxv_end - auxv_start + 1) * sizeof (ElfW(auxv_t)));
 }
 
 static gboolean
